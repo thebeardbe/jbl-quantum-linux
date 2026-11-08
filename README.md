@@ -25,6 +25,20 @@ period and the headroom fixes it permanently:
 | `systemctl --user restart pipewire` fixes it for seconds | Then the same state returns |
 | It worked at first, or works on Windows | The failure is a timing race, not a broken device |
 
+Two traps that cost real time:
+
+- **It looks like a network problem.** A video sits on the buffering spinner, so the
+  obvious suspect is wifi or the router. It is not: measured during the "buffering",
+  receive throughput was 102 KB/s with 2 ms gateway RTT and 0% loss — the data
+  arrives fine and the player blocks on a device that never consumes its buffer.
+- **PipeWire says the node is `RUNNING`.** That state belongs to the *PipeWire node*,
+  not to the hardware. The ALSA device can be stuck in `XRUN` at the same moment.
+  Always check the hardware:
+
+  ```bash
+  head -1 /proc/asound/card*/pcm*p/sub0/status   # expect: state: RUNNING
+  ```
+
 ## Root cause
 
 Measured on the 360X (and the numbers are the whole story):
@@ -58,6 +72,22 @@ api.alsa.headroom    = 8192
 
 With those, the device comes up with `period_size 512`, which PipeWire feeds
 comfortably. No more XRUN, no more log spam, audio plays.
+
+### Why you will see both 1024 and 512 (and neither is wrong)
+
+You configured 1024, so a first look at the node can look like the rule was ignored:
+
+| Node state | `api.alsa.period-size` | `api.alsa.headroom` | `hw_params` `period_size` |
+|---|---|---|---|
+| **closed** (reports the request) | `1024` | `8192` | n/a |
+| **streaming** (negotiated) | `512` | `8704` | `512` |
+
+A closed node reports what the rule asked for. A streaming node reports what
+PipeWire negotiated with the hardware: the period is halved and the difference is
+moved into headroom (8192 → 8704), so total buffering is unchanged. `hw_params`
+always reports the negotiated value, which is the number to trust while audio is
+playing. A second PCM (the 360X chat channel) negotiates `period_size 256` the same
+way.
 
 ### Install
 
@@ -126,7 +156,9 @@ Two things make that usable:
   ```
 
   The 350, for example, has a single playback PCM, so there is no split to gain
-  and its normal profile should be kept. To enable the split for another model,
+  and its normal profile should be kept. Note its node name is
+  `usb-JBL_JBL_Quantum350_Wireless-00` — no underscore before `350` — so a
+  hand-written per-model rule copied from the 360X will silently miss it. To enable the split for another model,
   find your card name and add (or edit) that rule — see
   [Adapting to your model](#adapting-to-your-model).
 
@@ -135,6 +167,14 @@ Two things make that usable:
 - GUI: `pavucontrol` → **Playback** → move the stream to `pro-output-1`.
 - CLI: `pactl move-sink-input <stream-index> <sink-name>`
   (`pactl list sink-inputs short`, `pactl list sinks short`).
+
+### Two headsets on one machine
+
+Edge case worth knowing: those priorities do not add up across models. A 350 left
+on its normal `analog-stereo` profile carries profile priority **6500**, which
+outranks the 360X `pro-output-0` at **2500** — so the 350 wins the default sink.
+Harmless with one headset per machine; raise rule 3 above 6500 if the 360X should
+always win on a shared one.
 
 ## The gotcha that wastes the most time: WirePlumber remembers
 
@@ -161,19 +201,25 @@ The same applies to a remembered default sink in `default-nodes`.
 ## Verify it worked
 
 ```bash
-# 1. no more XRUN spam (leave it running while you play something)
-journalctl --user -u pipewire -f | grep -i 'snd_pcm_avail'
+# 1. the hardware is running, not XRUN (while something is playing)
+head -1 /proc/asound/card*/pcm*p/sub0/status      # expect: state: RUNNING
+awk '/period_size|buffer_size/' /proc/asound/card*/pcm*p/sub0/hw_params
+                                                  # expect period_size 512 (see above)
 
-# 2. the node reports the raised period
-cat /proc/asound/card*/pcm*p/sub*/hw_params   # expect period_size 512
+# 2. the log stops producing the line; this must stay at 0
+journalctl --user --since '-2min' | grep -c 'snd_pcm_avail after recover'
 
-# 3. the card is on pro-audio (360X only)
+# 3. play a test tone straight at the node (bypasses the desktop mixer)
+pw-play --target=alsa_output.usb-JBL_JBL_Quantum_360X_Wireless-00.analog-stereo \
+  /path/to/tone.wav
+
+# 4. the card is on pro-audio (360X only)
 pactl list cards short
 
-# 4. both PCMs are addressable (360X only)
+# 5. both PCMs are addressable (360X only)
 wpctl status | grep -E 'pro-output'
 
-# 5. no errors accumulating on the node
+# 6. no errors accumulating on the node
 pw-top
 ```
 
@@ -200,6 +246,22 @@ pactl list sources short
 | Still seeing XRUN, but rarer | Try `headroom = 16384` and/or `period-size = 2048`; USB controllers differ |
 | Profile keeps reverting | See [the gotcha](#the-gotcha-that-wastes-the-most-time-wireplumber-remembers) |
 | Nothing at all changed | WirePlumber 0.4? The 0.5 config format is ignored there |
+
+## What the dongle does on plug (not a fault, but it confuses debugging)
+
+Every plug produces **two enumeration events about 9 seconds apart**. The dongle
+comes up in its other personality first and then re-enumerates into the simpler
+(Xbox-compatible) mode:
+
+```
+20:44:15  new device 24, 0ecb:20a9  "JBL Quantum 360 Wireless", Mfr Harman International
+20:44:23  USB disconnect, device 24
+20:44:24  new device 25, 0ecb:20a5  ...        <- the card you actually use
+```
+
+So the card vanishing and reappearing while you are inspecting it is the dongle
+switching modes, not a driver crash. Wait for the second event before drawing any
+conclusion. (A 350 enumerates only once, `0ecb:206b`, so it does not do this.)
 
 ## Scope
 
