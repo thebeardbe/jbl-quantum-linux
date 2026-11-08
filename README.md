@@ -10,7 +10,8 @@ period and the headroom fixes it permanently:
 
 - [`99-jbl-headsets.conf`](99-jbl-headsets.conf) — the WirePlumber drop-in
 - Works on any distro using **WirePlumber 0.5+** (the current config format)
-- Tested on a JBL Quantum **360X Wireless** over USB; see [Scope](#scope)
+- Tested on a JBL Quantum **360X Wireless** and a **Quantum 350**, both over USB;
+  see [Scope](#scope)
 
 ---
 
@@ -204,6 +205,10 @@ pactl list sources short
 
 - **Measured on:** JBL Quantum 360X Wireless (USB), PipeWire 1.6.x, WirePlumber
   0.5.x.
+- **Confirmed on:** JBL Quantum 350 Wireless (USB) on 2026-11-06. Same failure,
+  same fix, same `period_size 512`. The 350 exposes a single playback PCM, so the
+  pro-audio game/chat split below does not apply to it and it should keep its
+  normal profile.
 - **The period fix** should apply to other JBL Quantum **USB** headsets, since it
   targets the device's own period rather than a model name. It is drafted that
   way on purpose.
